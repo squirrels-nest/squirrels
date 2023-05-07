@@ -1,8 +1,7 @@
-mkdocs
+pytest
 pyyaml
-sqlalchemy<2
 pandas
-pandasql
+sqlalchemy
 GitPython
 Jinja2
 uvicorn
@@ -10,3 +9,4 @@ fastapi
 cachetools
 pwinput
 inquirer
+openpyxl

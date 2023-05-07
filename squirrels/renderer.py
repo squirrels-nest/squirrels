@@ -1,226 +1,279 @@
-import os, json, time, copy
-import concurrent.futures
-from typing import Dict, Tuple, List, Union, Any
-from importlib.machinery import SourceFileLoader
+from typing import Dict, Tuple, Optional, Union, Callable, Any
+from functools import partial
 from configparser import ConfigParser
-from pathlib import Path
-from functools import lru_cache
-from squirrels import constants as c, manifest as mf
-from squirrels.db_conn import DbConnection
-from squirrels.utils import timer
+import concurrent.futures, os, json, time
 
-start = time.time()
-import jinja2 as j2
-timer.add_activity_time(c.IMPORT_JINJA, start)
+from squirrels import manifest as mf, utils, constants as c
+from squirrels.connection_set import ConnectionSet, sqldf
+from squirrels.param_configs.data_sources import DataSource
+from squirrels.param_configs.parameter_set import ParameterSet
+from squirrels.utils import ConfigurationError
+from squirrels.timed_imports import pandas as pd, timer
 
-start = time.time()
-from pandasql import sqldf
-from pandas import DataFrame
-timer.add_activity_time(c.IMPORT_PANDAS, start)
-
-from squirrels.parameter_configs import ParameterSet
-
-
-def join_paths(path1: str, path2: str):
-    return Path(path1) / path2
-
-
-def get_file_path(relative_folder: str, filename: str):
-    filepath = join_paths(relative_folder, filename) if filename is not None else None
-    if filepath is not None and not os.path.exists(filepath):
-        raise FileNotFoundError(f'The file "{filename}" could not be found relative to the "{relative_folder}" folder')
-    return str(filepath) if filepath is not None else None
-
-
-def run_module_main(input_folder: str, py_file: str, main_args: Dict[str, Any] = {}) -> Any:
-    module_path = get_file_path(input_folder, py_file)
-    module = SourceFileLoader(py_file, module_path).load_module()
-    return module.main(**main_args)
-
-
-@lru_cache(maxsize=None)
-def load_parameters_helper(input_folder: str, dataset: str, lu_data: str) -> ParameterSet:
-    lu_data_path = get_file_path(input_folder, lu_data)
-    db_profile_name = mf.get_db_profile_name(dataset) if lu_data is None else None
-    parameters = ParameterSet(run_module_main(input_folder, c.PARAMETERS_FILE))
-    parameters._convert_datasource_params(db_profile_name, lu_data_path)
-    return parameters
-
-def load_parameters(input_folder: str, dataset: str, lu_data: str) -> ParameterSet:
-    return copy.deepcopy(load_parameters_helper(input_folder, dataset, lu_data))
+ContextFunc = Optional[Callable[..., Dict[str, Any]]]
+DatabaseViews = Optional[Dict[str, pd.DataFrame]]
+Query = Union[Callable[..., pd.DataFrame], str]
 
 
 class Renderer:
-    def __init__(self, dataset, selection_cfg: str = None, lu_data: str = None) -> None:
-        # Dynamically import the parameters.py configuration file and convert all datasources parameters
-        start = time.time()
-        mf.initialize(c.MANIFEST_FILE)
+    def __init__(self, dataset: str, manifest: mf.Manifest, conn_set: ConnectionSet, raw_param_set: ParameterSet, 
+                 context_func: Callable[..., Dict[str, Any]], raw_query_by_db_view: Dict[str, Query], 
+                 raw_final_view_query: Query, excel_file: Optional[pd.ExcelFile] = None):
         self.dataset = dataset
-        self.input_folder = join_paths(c.DATASETS_FOLDER, dataset)
-        self.selection_cfg = get_file_path(self.input_folder, selection_cfg)
-        self.parameters = load_parameters(self.input_folder, dataset, lu_data)
-        self.job_context = {}
-        timer.add_activity_time('initialize Renderer', start)
+        self.manifest = manifest
+        self.conn_set = conn_set
+        self.context_func = context_func
+        self.raw_query_by_db_view = raw_query_by_db_view
+        self.raw_final_view_query = raw_final_view_query
 
-    
-    def get_main_args1(self):
-        return {'prms': self.parameters.get_parameter_by_name, 'proj': self.get_project_var}
-
-    def set_job_context(self) -> Dict[str, Any]:
-        try:
-            self.job_context = run_module_main(self.input_folder, c.CONTEXT_FILE, self.get_main_args1())
-        except FileNotFoundError:
-            pass
-        
-    def get_job_context_by_name(self, name: str):
-        return self.job_context[name]
-    
-    def get_project_var(self, name: str):
-        return mf.parms[c.PROJ_VARS_KEY][name]
-    
-    def get_main_args2(self):
-        main_args = self.get_main_args1()
-        main_args['ctx'] = self.get_job_context_by_name
-        return main_args
-    
-    
-    def run_final_view_from_python(self, py_file: str, database_views: Dict[str, DataFrame]) -> DataFrame:
-        main_args = self.get_main_args2()
-        main_args['database_views'] = database_views
-        return run_module_main(self.input_folder, py_file, main_args)
-
-    
-    def render_view(self, view_file: str) -> str:
-        env = j2.Environment(loader=j2.FileSystemLoader('.'))
-        template = env.get_template(view_file.replace('\\', '/'))
-        args = {
-            'prms': self.parameters.get_parameter_by_name,
-            'ctx':  self.get_job_context_by_name,
-            'proj': self.get_project_var
-        }
-        return template.render(args)
-    
-
-    def get_rendered_sql_by_view(self) -> Dict[str, str]:
-        dataset_parms = mf.parms[c.DATASETS_KEY][self.dataset]
-        bigdata_sql: List[Dict[str, str]] = dataset_parms[c.DATABASE_VIEWS_KEY]
-        
-        output = {}
-        for element in bigdata_sql:
-            view_name, view_file = element[c.DB_VIEW_NAME_KEY], element[c.DB_VIEW_FILE_KEY]
-            if view_file.endswith('.py'):
-                output[view_name] = view_file
-            else:
-                input_path = get_file_path(self.input_folder, view_file)
-                output[view_name] = self.render_view(input_path)
-        return output
-
-
-    def get_all_results(self, sql_by_view_name: Dict[str, str], final_view_name: str, final_view_sql_str: str = None) -> Tuple[Dict[str, DataFrame], DataFrame]:
-        conn = DbConnection(mf.get_db_profile_name(self.dataset))
-        
-        def run_single_query(item: Tuple[str, str]) -> Tuple[str, DataFrame]:
-            view_name, query = item
-            if query.endswith('.py'):
-                return view_name, run_module_main(self.input_folder, query, self.get_main_args2())
-            else:
-                return view_name, conn.get_dataframe_from_query(query)
-        
         start = time.time()
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            df_by_view_name = dict(executor.map(run_single_query, sql_by_view_name.items()))
-        timer.add_activity_time('run database views', start)
-        
-        start = time.time()
-        if final_view_name in sql_by_view_name:
-            final_df = df_by_view_name[final_view_name]
-        elif final_view_name.endswith('.py'):
-            final_df = self.run_final_view_from_python(final_view_name, df_by_view_name)
+        self.param_set: ParameterSet = self._convert_param_set_datasources(raw_param_set, excel_file)
+        timer.add_activity_time(f"convert datasources - dataset {dataset}", start)
+    
+    def _convert_param_set_datasources(self, param_set: ParameterSet, excel_file: Optional[pd.ExcelFile] = None) -> ParameterSet:
+        datasources = param_set.get_datasources()
+        if excel_file is not None:
+            df_dict = pd.read_excel(excel_file, None)
+            for key in datasources:
+                if key not in df_dict:
+                    raise ConfigurationError('No sheet found for parameter "{key}" in the Excel workbook')
         else:
-            final_df = sqldf(final_view_sql_str, env=df_by_view_name)
-        timer.add_activity_time('run final view', start)
+            def get_dataframe_from_query(item: Tuple[str, DataSource]) -> pd.DataFrame:
+                key, datasource = item
+                df = self.conn_set.get_dataframe_from_query(datasource.connection_name, datasource.get_query())
+                return key, df
+            
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                df_dict = dict(executor.map(get_dataframe_from_query, datasources.items()))
         
-        return df_by_view_name, final_df
+        param_set.convert_datasource_params(df_dict)
+        return param_set
     
-
-    def get_final_view_sql_str(self, final_view_name: str, database_view_names: Union[List[str], Dict[str, Any]]) -> str:
-        final_view_sql_str = None
-        if final_view_name not in database_view_names and not final_view_name.endswith('.py'):
-            final_view_path = get_file_path(self.input_folder, final_view_name)
-            final_view_sql_str = self.render_view(final_view_path)
-        return final_view_sql_str
-    
-
-    def write_outputs(self, runquery: bool):
-        # Apply selections from selections.cfg
+    def apply_selections(self, selections: Dict[str, str], updates_only: bool = False) -> ParameterSet:
         start = time.time()
-        if self.selection_cfg is not None:
+        parameter_set = self.param_set
+        parameters_dict = parameter_set.get_parameters_as_ordered_dict()
+        
+        # iterating through parameters dict instead of query_params since order matters for cascading parameters
+        for param_name, parameter in parameters_dict.items():
+            if param_name in selections:
+                value = selections[param_name]
+                parameter = parameter_set[param_name].with_selection(value)
+                updates = parameter.get_all_dependent_params()
+                if updates_only:
+                    parameter_set = updates
+                    break
+                parameter_set = parameter_set.merge(updates)
+        timer.add_activity_time(f"apply selections - dataset {self.dataset}", start)
+        
+        return parameter_set
+
+    def _render_context(self, context_func: ContextFunc, param_set: ParameterSet) -> Dict[str, Any]:
+        try:
+            return context_func(param_set, self.manifest.get_proj_vars()) if context_func is not None else {}
+        except Exception as e:
+            raise ConfigurationError(f'Error in the {c.CONTEXT_FILE} function for dataset "{self.dataset}"') from e
+    
+    def _get_args(self, param_set: ParameterSet, context: Dict[str, Any]) -> Dict:
+        return {
+            'prms': param_set,
+            'ctx':  context,
+            'proj': self.manifest.get_proj_vars()
+        }
+    
+    def _render_query_from_raw(self, raw_query: Query, args: Dict) -> Query:
+        if isinstance(raw_query, str):
+            template = utils.j2_env.from_string(raw_query)
+            return template.render(args)
+        else:
+            return partial(raw_query, **args)
+    
+    def _render_dataframe_from_sql(self, db_view_name: str, sql_str: str, 
+                                   database_views: DatabaseViews = None) -> pd.DataFrame:
+        if database_views is not None:
+            return sqldf(sql_str, database_views)
+        else:
+            conn_name = self.manifest.get_database_view_db_connection(self.dataset, db_view_name)
+            return self.conn_set.get_dataframe_from_query(conn_name, sql_str)
+
+    def _render_dataframe_from_py_func(self, db_view_name: str, py_func: Callable[[Any], pd.DataFrame], 
+                                       database_views: DatabaseViews = None) -> pd.DataFrame:
+        if database_views is not None:
+            try:
+                return py_func(database_views=database_views)
+            except Exception as e:
+                raise ConfigurationError(f'Error in the final view python function for dataset "{self.dataset}"') from e
+        else:
+            conn_name = self.manifest.get_database_view_db_connection(self.dataset, db_view_name)
+            connection_pool = self.conn_set.get_connection_pool(conn_name)
+            try:
+                return py_func(connection_pool=connection_pool, connection_set=self.conn_set)
+            except Exception as e:
+                raise ConfigurationError(f'Error in the python function for database view "{db_view_name}" in dataset "{self.dataset}"') from e
+    
+    def _render_db_view_dataframes(self, query_by_db_view: Dict[str, Query]) -> Dict[str, pd.DataFrame]:
+        def run_single_query(item: Tuple[str, Query]) -> Tuple[str, pd.DataFrame]:
+            view_name, query = item
+            if isinstance(query, str):
+                return view_name, self._render_dataframe_from_sql(view_name, query)
+            else:
+                return view_name, self._render_dataframe_from_py_func(view_name, query)
+        
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            df_by_view_name = executor.map(run_single_query, query_by_db_view.items())
+        
+        return dict(df_by_view_name)
+    
+    def _render_final_view_dataframe(self, df_by_db_views: Dict[str, pd.DataFrame], 
+                                    final_view_query: Optional[Query]) -> pd.DataFrame:
+        if final_view_query in df_by_db_views:
+            return df_by_db_views[final_view_query]
+        elif isinstance(final_view_query, str):
+            return self._render_dataframe_from_sql("final_view", final_view_query, df_by_db_views)
+        else:
+            return self._render_dataframe_from_py_func("final_view", final_view_query, df_by_db_views)
+
+    def load_results(self, selections: Dict[str, str], run_query: bool = True) \
+        -> Tuple[ParameterSet, Dict[str, Query], Query, Dict[str, pd.DataFrame], Optional[pd.DataFrame]]:
+        
+        # apply selections and render context
+        param_set = self.apply_selections(selections)
+        start = time.time()
+        context = self._render_context(self.context_func, param_set)
+        timer.add_activity_time(f"render context - dataset {self.dataset}", start)
+
+        # render database view queries
+        start = time.time()
+        query_by_db_view = {}
+        args = self._get_args(param_set, context)
+        for db_view, raw_query in self.raw_query_by_db_view.items():
+            query_by_db_view[db_view] = self._render_query_from_raw(raw_query, args)
+        timer.add_activity_time(f"render database view queries - dataset {self.dataset}", start)
+
+        # render final view query
+        start = time.time()
+        final_view_query = self._render_query_from_raw(self.raw_final_view_query, args)
+        timer.add_activity_time(f"render final view query - dataset {self.dataset}", start)
+
+        # render all dataframes if "run_query" is enabled
+        df_by_db_views = {}
+        final_view_df = None
+        if run_query:
+            start = time.time()
+            df_by_db_views = self._render_db_view_dataframes(query_by_db_view)
+            timer.add_activity_time(f"execute dataview view queries - dataset {self.dataset}", start)
+
+            start = time.time()
+            final_view_df = self._render_final_view_dataframe(df_by_db_views, final_view_query)
+            timer.add_activity_time(f"execute final view query - dataset {self.dataset}", start)
+        
+        return param_set, query_by_db_view, final_view_query, df_by_db_views, final_view_df
+
+
+def default_context_func(*args, **kwargs):
+    return {}
+
+
+class RendererIOWrapper:
+    def __init__(self, dataset: str, manifest: mf.Manifest, conn_set: ConnectionSet, excel_file_name: Optional[str] = None):
+        dataset_folder = manifest.get_dataset_folder(dataset)
+        parameters_path = utils.join_paths(dataset_folder, c.PARAMETERS_FILE)
+        parameters_module = utils.import_file_as_module(parameters_path)
+        try:
+            parameter_set = parameters_module.main()
+        except Exception as e:
+            raise ConfigurationError(f'Error in the {c.PARAMETERS_FILE} function for dataset "{dataset}"') from e
+
+        context_path = utils.join_paths(dataset_folder, c.CONTEXT_FILE)
+        try:
+            context_func = utils.import_file_as_module(context_path).main
+        except FileNotFoundError:
+            context_func = default_context_func
+        
+        excel_file = None
+        if excel_file_name is not None:
+            excel_file_path = utils.join_paths(dataset_folder, excel_file_name)
+            excel_file = pd.ExcelFile(excel_file_path)
+        
+        db_views = manifest.get_all_database_view_names(dataset)
+        raw_query_by_db_view = {}
+        for db_view in db_views:
+            db_view_template_path = str(manifest.get_database_view_file(dataset, db_view))
+            raw_query_by_db_view[db_view] = self._get_raw_query(db_view_template_path)
+        
+        final_view_path = str(manifest.get_dataset_final_view(dataset))
+        if final_view_path in db_views:
+            raw_final_view_query = final_view_path
+        else:
+            raw_final_view_query = self._get_raw_query(final_view_path)
+        
+        self.dataset_folder = dataset_folder
+        self.output_folder = utils.join_paths(c.OUTPUTS_FOLDER, dataset)
+        self.renderer = Renderer(dataset, manifest, conn_set, parameter_set, context_func,
+                                 raw_query_by_db_view, raw_final_view_query, excel_file)
+    
+    def _get_raw_query(self, template_path: str) -> Dict[str, Query]:
+        if template_path.endswith(".py"):
+            return utils.import_file_as_module(template_path).main
+        else:
+            with open(template_path, 'r') as f:
+                sql_template = f.read()
+            return sql_template
+
+    def _get_selections(self, selection_cfg_file: Optional[str]) -> Dict[str, str]:
+        if selection_cfg_file is not None:
+            selection_cfg_path = utils.join_paths(self.dataset_folder, selection_cfg_file)
             config = ConfigParser()
-            config.read(self.selection_cfg)
+            config.read(selection_cfg_path)
             if config.has_section(c.PARAMETERS_SECTION):
                 config_section = config[c.PARAMETERS_SECTION]
-                for name, parameter in self.parameters._parameters_dict.items():
-                    parameter.refresh(self.parameters)
-                    if name in config_section:
-                        parameter.set_selection(config_section[name])
-        timer.add_activity_time('apply selections', start)
+                return dict(config_section.items())
+        return {}
 
-        # Set context
-        start = time.time()
-        self.set_job_context()
-        timer.add_activity_time('set job context', start)
-
-        # Clear output folder contents and write the parameters metadata to file
-        start = time.time()
-        output_folder = join_paths(c.OUTPUTS_FOLDER, self.dataset)
-        if not os.path.exists(output_folder):
-            os.makedirs(output_folder)
+    def _write_sql_file(self, view_name: str, query: Any):
+        if isinstance(query, str):
+            db_view_sql_output_path = utils.join_paths(self.output_folder, view_name+'.sql')
+            with open(db_view_sql_output_path, 'w') as f:
+                f.write(query)
+    
+    def write_outputs(self, selection_cfg_file: Optional[str], run_query: bool) -> None:
+        # create output folder if it doesn't exist
+        if not os.path.exists(self.output_folder):
+            os.makedirs(self.output_folder)
         
-        files = os.listdir(output_folder)
+        # clear everything in output folder
+        files = os.listdir(self.output_folder)
         for file in files:
-            file_path = join_paths(output_folder, file)
+            file_path = utils.join_paths(self.output_folder, file)
             os.remove(file_path)
         
-        parameters_outfile = join_paths(output_folder, c.PARAMETERS_OUTPUT)
-        with open(parameters_outfile, 'w') as f:
-            json.dump(self.parameters._to_dict(), f, indent=4)
-        timer.add_activity_time('write parameters', start)
+        # apply selections and render outputs
+        selections = self._get_selections(selection_cfg_file)
+        result = self.renderer.load_results(selections, run_query)
+        param_set, query_by_db_view, final_view_query, df_by_db_views, final_view_df = result
         
-        # Render and write the sql queries
-        start = time.time()
-        dataset_parms = mf.parms[c.DATASETS_KEY][self.dataset]
+        # write the parameters response
+        param_set_dict = param_set.to_dict()
+        parameter_json_output_path = utils.join_paths(self.output_folder, c.PARAMETERS_OUTPUT)
+        with open(parameter_json_output_path, 'w') as f:
+            json.dump(param_set_dict, f, indent=4)
         
-        def write_sql_file(view_name: str, sql_str: str):
-            if not sql_str.endswith('.py'):
-                sql_file = join_paths(output_folder, view_name+'.sql')
-                with open(sql_file, 'w') as f:
-                    f.write(sql_str)
-        
-        sql_by_view_name = self.get_rendered_sql_by_view()
-        for view_name, db_view_sql_str in sql_by_view_name.items():
-            write_sql_file(view_name, db_view_sql_str)
+        # write the rendered sql queries for database views
+        for db_view, query in query_by_db_view.items():
+            self._write_sql_file(db_view, query)
 
-        final_view_name = dataset_parms[c.FINAL_VIEW_KEY]
-        final_view_sql_str = self.get_final_view_sql_str(final_view_name, sql_by_view_name)
-        if final_view_sql_str is not None:
-            write_sql_file(c.FINAL_VIEW_NAME, final_view_sql_str)
-        timer.add_activity_time('write sql files', start)
-
+        # write the rendered sql query for final view
+        if final_view_query not in query_by_db_view:
+            self._write_sql_file(c.FINAL_VIEW_OUT_STEM, final_view_query)
+        
         # Run the sql queries and write output
-        if runquery:
-            start = time.time()
-            df_by_view_name, final_df = self.get_all_results(sql_by_view_name, final_view_name, final_view_sql_str)
-            
-            for view_name, df in df_by_view_name.items():
-                csv_file = join_paths(output_folder, view_name+'.csv')
+        if run_query:
+            for db_view, df in df_by_db_views.items():
+                csv_file = utils.join_paths(self.output_folder, db_view+'.csv')
                 df.to_csv(csv_file, index=False)
             
-            final_csv_path = join_paths(output_folder, c.FINAL_VIEW_NAME+'.csv')
-            final_df.to_csv(final_csv_path, index=False)
+            final_csv_path = utils.join_paths(self.output_folder, c.FINAL_VIEW_OUT_STEM+'.csv')
+            final_view_df.to_csv(final_csv_path, index=False)
 
-            final_json_path = join_paths(output_folder, c.FINAL_VIEW_NAME+'.json')
-            final_df.to_json(final_json_path, orient='table', index=False, indent=4)
-            timer.add_activity_time('query and write results', start)
-
-        # Print status
-        print(f'Outputs written! See the "{output_folder}" folder for output files')
+            final_json_path = utils.join_paths(self.output_folder, c.FINAL_VIEW_OUT_STEM+'.json')
+            final_view_df.to_json(final_json_path, orient='table', index=False, indent=4)

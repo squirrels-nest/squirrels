@@ -1,10 +1,19 @@
-from squirrels.parameter_configs import ParameterOption, WidgetType, Parameter, ParameterSet
-from squirrels.parameter_configs import SingleSelectParameter, MultiSelectParameter, DateParameter, NumberParameter, RangeParameter, DataSourceParameter
-from squirrels.parameter_configs import OptionsDataSource, NumberDataSource, RangeDataSource, DateDataSource
-import os
+from .param_configs.parameter_options import SelectParameterOption, DateParameterOption, NumberParameterOption, NumRangeParameterOption
+from .param_configs.parameters import WidgetType, Parameter, SingleSelectParameter, MultiSelectParameter, DateParameter, NumberParameter, NumRangeParameter
+from .param_configs.data_sources import SelectionDataSource, DateDataSource, NumberDataSource, NumRangeDataSource, DataSourceParameter
+from .param_configs.parameter_set import ParameterSet
+from .connection_set import ConnectionSet
+from .version import __version__, major_version, minor_version, patch_version
 
-version_file = os.path.join(os.path.dirname(__file__), 'version.txt')
-with open(version_file, 'r') as f:
-    __version__ = f.read()
+def get_credential(key: str):
+    """
+    Gets the username and password that was set through "$squirrels set-credential [key]"
 
-major_version, minor_version, patch_version = __version__.split('.')
+    Parameters:
+        key (str): The credential key
+    
+    Returns:
+        Credential: Object with attributes "username" and "password"
+    """
+    from .credentials_manager import squirrels_config_io
+    return squirrels_config_io.get_credential(key)
