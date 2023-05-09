@@ -1,4 +1,4 @@
-from typing import Iterable, Dict
+from typing import Type, Sequence, Dict
 import pytest, pandas as pd
 
 import squirrels as sq
@@ -16,14 +16,14 @@ class TestParentParameters:
         'trigger_refresh': True
     }
     
-    def get_expected_parent_json(self, widget_type: sq.WidgetType):
+    def get_expected_parent_json(self, widget_type: Type[sq.Parameter]):
         expected = dict(self.expected_base)
-        if widget_type == sq.WidgetType.SingleSelect:
+        if widget_type == sq.SingleSelectParameter:
             expected['name'] = 'ss_parent'
-            expected['widget_type'] = widget_type.name
-        elif widget_type == sq.WidgetType.MultiSelect:
+            expected['widget_type'] = widget_type.__name__
+        elif widget_type == sq.MultiSelectParameter:
             expected['name'] = 'ms_parent'
-            expected['widget_type'] = widget_type.name
+            expected['widget_type'] = widget_type.__name__
             expected.update({
                 'include_all': True,
                 'order_matters': False
@@ -31,25 +31,25 @@ class TestParentParameters:
         return expected
 
     @pytest.fixture
-    def parent_options(self) -> Iterable[sq.SelectParameterOption]:
+    def parent_options(self) -> Sequence[sq.SelectParameterOption]:
         return (
             sq.SelectParameterOption('p0', 'Option 1'), sq.SelectParameterOption('p1', 'Option 2'),
             sq.SelectParameterOption('p2', 'Option 3'), sq.SelectParameterOption('p3', 'Option 4')
         )
 
     @pytest.fixture
-    def single_select_parent(self, parent_options: Iterable[sq.SelectParameterOption]) -> sq.SingleSelectParameter:
+    def single_select_parent(self, parent_options: Sequence[sq.SelectParameterOption]) -> sq.SingleSelectParameter:
         return sq.SingleSelectParameter('ss_parent', 'Parent Param', parent_options)
 
     @pytest.fixture
-    def multi_select_parent(self, parent_options: Iterable[sq.SelectParameterOption]) -> sq.MultiSelectParameter:
+    def multi_select_parent(self, parent_options: Sequence[sq.SelectParameterOption]) -> sq.MultiSelectParameter:
         return sq.MultiSelectParameter('ms_parent', 'Parent Param', parent_options)
 
-    parent_data_source = sq.SelectionDataSource('conn', 'table', 'id_val', 'options', order_by_col='order_by',
-                                      is_default_col='is_default')
+    parent_data_source = sq.SelectionDataSource('table', 'id_val', 'options', order_by_col='order_by',
+                                                is_default_col='is_default')
     @pytest.fixture
     def ds_param_parent(self) -> sq.DataSourceParameter:
-        return sq.DataSourceParameter(sq.WidgetType.SingleSelect, 'ds_parent', 'Parent Param', self.parent_data_source)
+        return sq.DataSourceParameter(sq.SingleSelectParameter, 'ds_parent', 'Parent Param', self.parent_data_source)
     
     @pytest.fixture
     def data_source_df(self) -> pd.DataFrame:
@@ -63,7 +63,7 @@ class TestParentParameters:
     @pytest.fixture
     def expected_ds_json(self) -> Dict:
         return {
-            'widget_type': 'SingleSelect',
+            'widget_type': 'SingleSelectParameter',
             'name': 'ds_parent',
             'label': 'Parent Param',
             'options': [
