@@ -95,6 +95,8 @@ def main():
             rendererIO = RendererIOWrapper(args.dataset, manifest, conn_set, args.data)
             rendererIO.write_outputs(args.cfg, args.runquery)
         conn_set._dispose()
+    elif args.command == c.CHECK_CMD:
+        print(f"Place Holder: function not yet implemented")
     elif args.command is None:
         print(f'Command is missing. Enter "squirrels -h" for help.')
     else:
