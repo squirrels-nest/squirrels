@@ -110,7 +110,7 @@ class ApiServer:
         results_path = base_path + '/{dataset}'
 
         results_cache_size = self.manifest.get_setting(c.RESULTS_CACHE_SIZE_SETTING, 128)
-        results_cache_ttl = self.manifest.get_setting(c.RESULTS_CACHE_TTL_SETTING, 1)#60*60)
+        results_cache_ttl = self.manifest.get_setting(c.RESULTS_CACHE_TTL_SETTING, 60*60)
 
         @ttl_cache(maxsize=results_cache_size, ttl=results_cache_ttl)
         def get_results_cachable(*args):
