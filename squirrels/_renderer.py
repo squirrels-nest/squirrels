@@ -11,18 +11,20 @@ from squirrels._utils import ConfigurationError
 from squirrels._timed_imports import pandas as pd, timer
 
 ContextFunc = Optional[Callable[..., Dict[str, Any]]]
+ChecksFunc = Optional[Callable[..., Dict[str, Any]]]
 DatabaseViews = Optional[Dict[str, pd.DataFrame]]
 Query = Union[Callable[..., pd.DataFrame], str]
 
 
 class Renderer:
     def __init__(self, dataset: str, manifest: mf.Manifest, conn_set: ConnectionSet, raw_param_set: ParameterSet, 
-                 context_func: Callable[..., Dict[str, Any]], raw_query_by_db_view: Dict[str, Query], 
+                 context_func: Callable[..., Dict[str, Any]], check_func: Callable[..., Dict[str, Any]], raw_query_by_db_view: Dict[str, Query], 
                  raw_final_view_query: Query, excel_file: Optional[pd.ExcelFile] = None):
         self.dataset = dataset
         self.manifest = manifest
         self.conn_set = conn_set
         self.context_func = context_func
+        self.check_func = check_func
         self.raw_query_by_db_view = raw_query_by_db_view
         self.raw_final_view_query = raw_final_view_query
 
@@ -73,6 +75,12 @@ class Renderer:
             return context_func(prms=param_set.get_parameters_as_ordered_dict()) if context_func is not None else {}
         except Exception as e:
             raise ConfigurationError(f'Error in the {c.CONTEXT_FILE} function for dataset "{self.dataset}"') from e
+    
+    def _render_check(self, check_func: ChecksFunc, param_set: ParameterSet, df: pd.DataFrame) -> Dict[str, Any]:
+        try:
+            return check_func(prms=param_set.get_parameters_as_ordered_dict(), df = df) if check_func is not None else {}
+        except Exception as e:
+            raise ConfigurationError(f'Error in the {c.CHECK_FILE} function for dataset "{self.dataset}"') from e
     
     def _get_args(self, param_set: ParameterSet, context: Dict[str, Any], db_view: str = None) -> Dict:
         if db_view is not None:
@@ -173,9 +181,17 @@ class Renderer:
             timer.add_activity_time(f"execute final view query - dataset {self.dataset}", start)
         
         return param_set, query_by_db_view, final_view_query, df_by_db_views, final_view_df
+    
+    def apply_check(self,selections: Dict[str, str], df: pd.DataFrame):
+        param_set = self.apply_selections(selections)
+        self._render_check(self.context_func, param_set, df)
+        return self._render_check(self.context_func, param_set, df)
 
 
 def default_context_func(*args, **kwargs):
+    return {}
+
+def default_check_func(*args, **kwargs):
     return {}
 
 
@@ -196,6 +212,13 @@ class RendererIOWrapper:
             context_func = partial(context_module.main, args=args)
         except FileNotFoundError:
             context_func = default_context_func
+
+        check_path = _utils.join_paths(dataset_folder, c.CHECK_FILE)
+        try:
+            check_module = _utils.import_file_as_module(check_path)
+            check_func = partial(check_module.main, args=args)
+        except FileNotFoundError:
+            check_func = default_check_func
         
         excel_file = None
         if excel_file_name is not None:
@@ -216,7 +239,7 @@ class RendererIOWrapper:
         
         self.dataset_folder = dataset_folder
         self.output_folder = _utils.join_paths(c.OUTPUTS_FOLDER, dataset)
-        self.renderer = Renderer(dataset, manifest, conn_set, parameter_set, context_func,
+        self.renderer = Renderer(dataset, manifest, conn_set, parameter_set, context_func, check_func, 
                                  raw_query_by_db_view, raw_final_view_query, excel_file)
     
     def _get_raw_query(self, template_path: str) -> Dict[str, Query]:
