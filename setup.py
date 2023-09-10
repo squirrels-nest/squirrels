@@ -20,13 +20,16 @@ extra_files = package_files(os.path.join('squirrels', 'package_data'))
 
 setup(
     name='squirrels',
-    version='0.1.1.post1',
+    version='0.1.2.rc1',
     packages=find_packages(),
     description='Squirrels - Configure REST APIs for BI Analytics',
     long_description=long_description,
     long_description_content_type="text/markdown",
     author='Tim Huang',
     author_email='tim.yuting@hotmail.com',
+    # Gonna need to get Tim's approval for this:
+    # maintainer='Peter Yang',
+    # maintainer_email='chaopeter.yang@gmail.com'
     license='MIT',
     install_requires=[
         'openpyxl', 'inquirer', 'pwinput', 'cachetools', 'fastapi', 'uvicorn', 
