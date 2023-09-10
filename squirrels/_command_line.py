@@ -37,6 +37,7 @@ def main():
     init_parser.add_argument('--db-view', type=str, choices=c.FILE_TYPE_CHOICES, help='Create database view as sql (default) or python file. Ignored if "--core" is not specified')
     init_parser.add_argument('--connections', action='store_true', help=f'Include the {c.CONNECTIONS_FILE} file')
     init_parser.add_argument('--context', action='store_true', help=f'Include the {c.CONTEXT_FILE} file')
+    init_parser.add_argument('--checks', action='store_true', help=f'Include the {c.CHECK_FILE} file')
     init_parser.add_argument('--selections-cfg', action='store_true', help=f'Include the {c.SELECTIONS_CFG_FILE} file')
     init_parser.add_argument('--final-view', type=str, choices=c.FILE_TYPE_CHOICES, help='Include final view as sql or python file')
     init_parser.add_argument('--sample-db', type=str, choices=c.DATABASE_CHOICES, help='Sample sqlite database to include')
