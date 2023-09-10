@@ -184,8 +184,8 @@ class Renderer:
     
     def apply_check(self, selections: Dict[str, str], df: pd.DataFrame) -> Dict[str, Any]:
         param_set = self.apply_selections(selections)
-        self._render_check(self.context_func, param_set, df)
-        return {"checks": self._render_check(self.context_func, param_set, df)}
+        self._render_check(self.check_func, param_set, df)
+        return {"checks": self._render_check(self.check_func, param_set, df)}
 
 
 def default_context_func(*args, **kwargs):
