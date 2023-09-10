@@ -47,16 +47,9 @@ class ApiServer:
     def _get_results_helper(self, dataset: str, query_params: Set[Tuple[str, str]]) -> Dict:
         renderer = self.renderers[dataset]
         _, _, _, _, df = renderer.load_results(dict(query_params))
-        checks_results = renderer.apply_checks(df)
+        checks_results = renderer.apply_check(df)
         results = {_utils.df_to_json(df), checks_results}
-        return json.dumps(results)
-        #return _utils.df_to_json(df)
-
-    def _get_checks_helper(self, dataset: str, query_params: Set[Tuple[str, str]]) -> Dict:
-        renderer = self.renderers[dataset]
-        _, _, _, _, df = renderer.load_results(dict(query_params))
-        checks_results = renderer.apply_checks()
-        return _utils.df_to_json(df)
+        return results
 
     def _apply_api_function(self, api_function):
         try:
