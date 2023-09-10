@@ -182,7 +182,7 @@ class Renderer:
         
         return param_set, query_by_db_view, final_view_query, df_by_db_views, final_view_df
     
-    def apply_check(self,selections: Dict[str, str], df: pd.DataFrame):
+    def apply_check(self, selections: Dict[str, str], df: pd.DataFrame):
         param_set = self.apply_selections(selections)
         self._render_check(self.context_func, param_set, df)
         return self._render_check(self.context_func, param_set, df)
