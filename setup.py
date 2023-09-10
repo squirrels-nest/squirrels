@@ -27,9 +27,6 @@ setup(
     long_description_content_type="text/markdown",
     author='Tim Huang',
     author_email='tim.yuting@hotmail.com',
-    # Gonna need to get Tim's approval for this:
-    # maintainer='Peter Yang',
-    # maintainer_email='chaopeter.yang@gmail.com'
     license='MIT',
     install_requires=[
         'openpyxl', 'inquirer', 'pwinput', 'cachetools', 'fastapi', 'uvicorn', 

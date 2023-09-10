@@ -40,7 +40,7 @@ class Initializer:
                 f.write(content)
 
     def init_project(self, args):
-        options = ['core', 'db_view', 'connections', 'context', 'selections_cfg', 'final_view', 'sample_db']
+        options = ['core', 'db_view', 'connections', 'context', 'checks', 'selections_cfg', 'final_view', 'sample_db']
         answers = { x: getattr(args, x) for x in options }
         if not any(answers.values()):
             core_questions = [
@@ -68,6 +68,9 @@ class Initializer:
                 inquirer.Confirm('selections_cfg',
                                 message=f"Do you want to add a '{c.SELECTIONS_CFG_FILE}' file?" ,
                                 default=False),
+                inquirer.Confirm('checks',
+                                message=f"Do you want to add a '{c.CHECK_FILE}' file?" ,
+                                default=False),
                 inquirer.List('final_view', 
                             message="What's the file format for the final view (if any)?",
                             choices=['none'] + c.FILE_TYPE_CHOICES),
@@ -92,6 +95,9 @@ class Initializer:
         
         if answers.get('context', False):
             self._copy_dataset_file(c.CONTEXT_FILE)
+
+        if answers.get('context', False):
+            self._copy_dataset_file(c.CHECK_FILE)
         
         if answers.get('selections_cfg', False):
             self._copy_dataset_file(c.SELECTIONS_CFG_FILE)
