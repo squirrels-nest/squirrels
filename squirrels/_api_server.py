@@ -48,7 +48,7 @@ class ApiServer:
         renderer = self.renderers[dataset]
         _, _, _, _, df = renderer.load_results(dict(query_params))
         checks_results = renderer.apply_check(dict(query_params), df)
-        results = {_utils.df_to_json(df), checks_results}
+        results = {**_utils.df_to_json(df), **checks_results}
         return results
 
     def _apply_api_function(self, api_function):
