@@ -67,9 +67,6 @@ def main():
     run_parser.add_argument('--host', type=str, default='127.0.0.1')
     run_parser.add_argument('--port', type=int, default=8000)
 
-    check_parser = subparsers.add_parser(c.CHECK_CMD, help = 'Run checks to check project integrity')
-    check_parser.add_argument('--default-only', action = 'store_true', help = 'Only run the default checks')
-
     args, _ = parser.parse_known_args()
     timer.verbose = args.verbose
     timer.add_activity_time('parsing arguments', start)
@@ -98,8 +95,6 @@ def main():
             rendererIO = RendererIOWrapper(args.dataset, manifest, conn_set, args.data)
             rendererIO.write_outputs(args.cfg, args.runquery)
         conn_set._dispose()
-    elif args.command == c.CHECK_CMD:
-        print(f"Place Holder: function not yet implemented")
     elif args.command is None:
         print(f'Command is missing. Enter "squirrels -h" for help.')
     else:
